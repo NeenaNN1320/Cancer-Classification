@@ -1,0 +1,216 @@
+---
+title: "Cancer Classification"
+author: "Neena"
+output: html_document
+---
+
+```{r}
+library(caret)
+library(corrplot)
+library(ggplot2)
+library(dplyr)
+library(keep)
+library(glmnet)
+library(NeuralNetTools)
+library(randomForest)
+library(tidyr)
+set.seed(1101)
+```
+
+#read data
+The breast cancer data consists of 30 features , they are computed from a digitized image of a fine needle aspirate (FNA) of a breast mass. They describe characteristics of the cell nuclei present in the image. n the 3-dimensional space is that described in: [K. P. Bennett and O. L. Mangasarian: "Robust Linear Programming Discrimination of Two Linearly Inseparable Sets", Optimization Methods and Software 1, 1992, 23-34].
+
+This database is also available through the UW CS ftp server: ftp ftp.cs.wisc.edu cd math-prog/cpo-dataset/machine-learn/WDBC/
+  
+  Also can be found on UCI Machine Learning Repository: https://archive.ics.uci.edu/ml/datasets/Breast+Cancer+Wisconsin+%28Diagnostic%29 
+
+The target  variable is diagnosis, tumor being malignant or benign. These 30 features are measures of the tumor such as radius, size, perimeter etc
+```{r}
+bcancer <- read.csv("data.csv")
+table(bcancer$diagnosis)
+```
+The objective of the analysis is to predict the the diagnosis of each patient id using these 30 features. I will use a classification model to identify the diagnosis.
+
+
+DATA EXPLORATION
+
+There are no missing values in the data and the distribution of the target variable is 63% of benign cancer and 37% of malignant cancer cells.
+
+
+```{r}
+corMatrix <- cor(bcancer[,3:32])
+corrplot(corMatrix , tl.cex = 1, addrect = 8 , type = "upper")
+
+```
+
+```{r}
+summary(bcancer[,3:32])
+```
+
+
+Many features in the data are highly correlated. For e.g. radius mean and radius worst. This could cause multicolinearity in our models. Looking at the univariate plot of the data, we can see that the variables are very skewed . Most variables are right skewed and have varying range and scales. The variance in some of the area_se variable is quite high.
+
+
+```{r}
+bcancer[,3:32] %>%
+  #keep(is.numeric) %>%                     # Keep only numeric columns
+  gather() %>%                             # Convert to key-value pairs
+  ggplot(aes(value)) +                     # Plot the values
+  facet_wrap(~ key, scales = "free") +   # In separate panels
+  geom_density()  
+```
+
+As these distributions are skewed and vary largely on the scale I will transform the data. Using log transformation will cause errors as some values are 0 leading to undefined cases. Hence, I use a square root transformation and then rescale the data.
+
+```{r}
+sdata <- bcancer
+sdata[,3:32] <- sqrt(sdata[,3:32])
+sdata[,3:32] <-  scale(sdata[,3:32])
+
+sdata[,3:32] %>%
+  #keep(is.numeric) %>%                     # Keep only numeric columns
+  gather() %>%                             # Convert to key-value pairs
+  ggplot(aes(value)) +                     # Plot the values
+  facet_wrap(~ key, scales = "free") +   # In separate panels
+  geom_density() 
+
+```
+
+Now that the data is centered we could try different models on our data set. As there are many features in the data , to reduce the dimentionality of the data I will run a PCA on the scaled and transformed data.
+
+```{r}
+pca <- princomp(sdata[,3:32])
+pca_scores <- pca$scores
+#pca$loadings
+
+pairs(pca_scores[,1:2] , col = c("red" , "green")[sdata$diagnosis])
+```
+
+From the factor loading we can see that none of the components contribute heavily into the classification and only 7% variance is explained by the first 2 components. There are some overlap regions between the two classes which would be difficult to classify. Its hard to say from the princomp to decide which component will classify the data correctly, I chose to not go ahead with pca.
+
+
+
+
+```{r}
+s <- sdata[,2:32]
+inTrain <- createDataPartition(y=s$diagnosis, p=0.7, list=FALSE)
+training <- s[inTrain,]
+testing <- s[-inTrain,]
+```
+
+
+SVM - Linear
+
+```{r}
+train_control <- trainControl(method="repeatedcv", number=10, repeats=20) 
+s <- sdata[,2:32]
+svmLinear <- train(diagnosis~., data= training, trControl=train_control, method="svmLinear")
+
+
+fit_svmLinear <- predict(svmLinear , newdata = testing)
+cm_svmL <- confusionMatrix(fit_svmLinear , testing$diagnosis)
+cm_svmL
+```
+
+SVM - Radial
+
+We will perform a 10 fold cross validation on the test data and do an out of sample testing for each model.
+
+```{r}
+svmRadial <- train(diagnosis~., data= training, trControl=train_control, method="svmRadial")
+
+
+fit_svmRadial <- predict(svmRadial , newdata = testing)
+cm_svmR <- confusionMatrix(fit_svmRadial , testing$diagnosis)
+cm_svmR
+```
+
+
+```{r}
+svmRadial$results$Accuracy
+svmRadial$results$AccuracySD
+```
+
+SVM does a good job in predicting the classes with only 3 data points misclassified in the Radial SVM model. The insample accuracy of the model is also quite high with the standard deviation of 0.02. We can say the accuracy estimate of SVM is strong. In this problem, the false negatives are of high importance. It is crucial to detect the tumor so that the patients get treatments. Hence, we will try to reduce the false negatives, i.e those cases that are originally malignant but classified as benign.  
+
+
+```{r}
+knn <- train(diagnosis~., data= training, trControl=train_control, method="knn")
+fit_knn <- predict(knn , newdata = testing)
+CM_KNN <- confusionMatrix(fit_knn , testing$diagnosis)
+CM_KNN
+```
+
+KNN also has high accuracy but again there are more false negatives , which is not desirable.
+
+We will try thr random forest model with grid search approach.
+```{r}
+
+tuneGrid <- expand.grid(.mtry = c(1:15) )
+trControl <- trainControl(method = "cv", number = 10, search = "grid")
+rf <- train(diagnosis~., data= training ,method = "rf", metric = "Accuracy",  trControl =trControl,tuneGrid=tuneGrid,  importance = TRUE,ntree=300)
+pred_rf <-predict(rf, testing)
+CM_RF <- confusionMatrix(pred_rf , testing$diagnosis)
+CM_RF
+plot(rf)
+```
+
+The results of random forest are more promising with just 2 false negatives. There are still 2 malignant cases that are classified as benign. We also have increased number of false positive in this model. I tried out different mtry for grid search and we can see that the maximum accuracy is obtained when 7 features are randomly sampled for each evaluvation which alos close to sqrt(30)
+
+
+```{r}
+varImpPlot(rf$finalModel,type=1  ,cex=.5)
+```
+We also look at the variable importance to understand the contribution of each variable in the classification process. To try an improve our model I will next try a neural network.
+
+
+
+
+```{r}
+set.seed(1101)
+tuneGrid <- expand.grid(.size = c(1:6), .decay=c(0,2.5e-2,5e-2,7.5e-2,1e-1,1e-2) )
+nnet <- capture.output(nn <- caret::train(diagnosis~., data= training, method = "nnet", metric = "Accuracy", trControl = trControl, tuneGrid = tuneGrid, importance = TRUE))
+
+
+fit_nn <- predict(nn , testing)
+t <- confusionMatrix(fit_nn , testing$diagnosis)
+t
+
+
+nnet_vatimpt <- varImp(nn)
+plot(nnet_vatimpt)
+```
+
+
+
+The neural network model also gives high accuracy and the missclassified rate is also low. Both the models random forest and Neural Network work well for this data. But I would like to go ahead with NNet model as it is less computational expensive compared to random forest.
+
+
+```{r}
+par(mfrow=c(2,2))
+
+fourfoldplot(t$table ,conf.level = 0, margin = 1 , main = "Neural Net")
+fourfoldplot(CM_RF$table ,conf.level = 0, margin = 1 , main = "Random Forest")
+fourfoldplot(CM_KNN$table,conf.level = 0, margin = 1 , main = "KNN")
+fourfoldplot(cm_svmR$table ,conf.level = 0, margin = 1 , main = "Linear SVM")
+
+
+
+```
+
+
+Analysing the missclassified data to understand the error in our model.  Through bivariate plots it is difficult to understand the error. Some expertise on the data and knowledge of the subject would probably help us understand the problem and build a finer model to detect the cancer.
+
+```{r}
+misclassified <- testing[which(fit_nn != testing[,1]), ]
+misclassified
+```
+
+```{r}
+
+
+plot(testing$texture_worst, col=ifelse(rownames(testing) %in% rownames(misclassified[1,])
+                                       , 'red', c("green" , "blue")[testing$diagnosis]), lower.panel = NULL)
+legend(120, 3, legend = c("Malignant" , "Benign" , "Misscfd as B") , col = c( "green" , "blue" ,"red") , pch = 16)
+
+```
